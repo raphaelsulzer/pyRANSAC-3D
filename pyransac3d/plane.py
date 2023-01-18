@@ -156,8 +156,6 @@ class Plane:
             best_side = np.nanargmax(in_out)
             occ_score = in_out[best_side,0]
 
-            if occ_score>1.0:
-                a=5
             occ_id_inliers = np.where(occ==best_side)[0]
 
             # Select indexes where distance is biggers than the threshold
@@ -167,7 +165,8 @@ class Plane:
             # normals
 
 
-            if (len(pt_id_inliers) >= minPoints) and (len(pt_id_inliers) > len(best_pt_inliers)) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
+            # if (len(pt_id_inliers) >= minPoints) and (len(pt_id_inliers) > len(best_pt_inliers)) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
+            if (len(pt_id_inliers) >= minPoints) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
                 best_eq = plane_eq
                 best_pt_inliers = pt_id_inliers
                 best_occ_inliers = occ_id_inliers
