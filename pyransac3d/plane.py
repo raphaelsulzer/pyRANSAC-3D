@@ -3,7 +3,7 @@ import random
 
 import numpy as np
 from scipy.linalg import lstsq
-
+from scipy.optimize import minimize
 from skimage import measure
 import matplotlib.pyplot as plt
 
@@ -31,14 +31,33 @@ class Plane:
         self.counter = count
 
 
-    def optimize_plane(self,points):
+    # def optimize_plane(self,points):
+    #
+    #     # from here:https://stackoverflow.com/questions/35118419/wrong-result-for-best-fit-plane-to-set-of-points-with-scipy-linalg-lstsq
+    #
+    #     A = np.c_[points[:,0], points[:,1], np.ones(points.shape[0])]
+    #     C, _, _, _ = lstsq(A, points[:,2],overwrite_a=False,overwrite_b=False,check_finite=True,lapack_driver='gelsy')
+    #
+    #     # return np.array((C[0], C[1], -1., C[2]))
+    #     return [C[0], C[1], -1., C[2]]
 
+    def optimize_plane(self, points, plane):
         # from here:https://stackoverflow.com/questions/35118419/wrong-result-for-best-fit-plane-to-set-of-points-with-scipy-linalg-lstsq
+        def model(params, xyz):
+            a, b, c, d = params
+            x, y, z = xyz
+            length_squared = a ** 2 + b ** 2 + c ** 2
+            return ((a * x + b * y + c * z + d) ** 2 / length_squared).sum()
 
-        A = np.c_[points[:,0], points[:,1], np.ones(points.shape[0])]
-        C, _, _, _ = lstsq(A, points[:,2],overwrite_a=True,overwrite_b=True,check_finite=False,lapack_driver='gelsy')
+        def unit_length(params):
+            a, b, c, d = params
+            return a ** 2 + b ** 2 + c ** 2 - 1
 
-        return np.array((C[0], C[1], -1., C[2]))
+        # x,y,z = points[:,0],points[:,1],points[:,2]
+        # constrain the vector perpendicular to the plane be of unit length
+        cons = ({'type': 'eq', 'fun': unit_length})
+        sol = minimize(model, plane, args=[points[:,0],points[:,1],points[:,2]], constraints=cons)
+        return tuple(sol.x)
 
     def project_points_to_plane(self,points,plane):
 
@@ -210,6 +229,11 @@ class Plane:
                     # print("Found {} component(s) plane".format(len(split_groups)))
                     split_best_pt_inliers = []
                     for sp in split_groups:
+                        # new_plane = self.optimize_plane(pts[best_pt_inliers[sp]])
+                        # new_inliers = self.get_pt_inliers(pts,new_plane,thresh)
+                        # self.plot_inliers(pts[new_inliers],new_plane)
+                        # best_eq = new_plane
+                        # split_best_pt_inliers.append(new_inliers)
                         split_best_pt_inliers.append(best_pt_inliers[sp])
                     self.equation = best_eq
                     self.pt_inliers_id = split_best_pt_inliers
@@ -307,8 +331,6 @@ class Plane:
             # get indexes where distance is smaller than the threshold
             pt_id_inliers = self.get_pt_inliers(pts,plane_eq,thresh)
 
-            
-
 
             # get occ inliers
             occ_score, occ, occ_id_inliers, in_out, best_side = self.get_occ_inliers(occ_tgt,pts_tgt,plane_eq) # i do not need the /sqrt for this, if I want to do v high level optimization
@@ -320,6 +342,7 @@ class Plane:
                 ## if the occupancy classification is also good on the other side of the plane
                 ## then take away these points too, ie take away all occ points
                 if in_out[np.invert(best_side),0] > minOccScore:
+                    print("all occupancy points are out")
                     occ_id_inliers = np.arange(occ.shape[0])
 
                 best_eq = plane_eq
@@ -327,7 +350,6 @@ class Plane:
 
                 best_occ_score = occ_score
                 best_occ_inliers = occ_id_inliers
-
 
         if segmentation:
             if len(best_eq) > 0:
@@ -338,9 +360,11 @@ class Plane:
                     split_best_pt_inliers = []
                     best_eqs = []
                     for sp in split_groups:
-                        new_plane = self.optimize_plane(pts[best_pt_inliers[sp]])
-                        new_inliers = self.get_pt_inliers(pts[best_pt_inliers[sp]],new_plane,thresh)
-                        self.plot_inliers(pts[new_inliers],new_plane)
+                        # new_plane = self.optimize_plane(pts[best_pt_inliers[sp]],best_eq)
+                        # new_inliers = self.get_pt_inliers(pts,new_plane,thresh)
+                        # self.plot_inliers(pts[new_inliers],new_plane)
+                        # best_eq = new_plane
+                        # split_best_pt_inliers.append(new_inliers)
                         split_best_pt_inliers.append(best_pt_inliers[sp])
                     self.equation = best_eq
                     self.pt_inliers_id = split_best_pt_inliers
