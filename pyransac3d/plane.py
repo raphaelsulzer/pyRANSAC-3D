@@ -308,13 +308,8 @@ class Plane:
                 maxIteration+=1
                 continue
 
-
-
             # We have to find the plane equation described by those 3 points
             # We find first 2 vectors that are part of this plane
-            # A = pt2 - pt1
-            # B = pt3 - pt1
-
             vecA = pt_samples[1, :] - pt_samples[0, :]
             vecB = pt_samples[2, :] - pt_samples[0, :]
 
@@ -327,16 +322,12 @@ class Plane:
             k = -np.sum(np.multiply(vecC, pt_samples[1, :]))
             plane_eq = [vecC[0], vecC[1], vecC[2], k]
 
-
             # get indexes where distance is smaller than the threshold
             pt_id_inliers = self.get_pt_inliers(pts,plane_eq,thresh)
-
 
             # get occ inliers
             occ_score, occ, occ_id_inliers, in_out, best_side = self.get_occ_inliers(occ_tgt,pts_tgt,plane_eq) # i do not need the /sqrt for this, if I want to do v high level optimization
 
-
-            # if (len(pt_id_inliers) >= minPoints) and (len(pt_id_inliers) > len(best_pt_inliers)) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
             if (len(pt_id_inliers) >= minPoints) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
 
                 ## if the occupancy classification is also good on the other side of the plane
