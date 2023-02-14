@@ -23,12 +23,14 @@ class Plane:
     ---
     """
 
-    def __init__(self,count=0):
+    def __init__(self,count=0,plot=False):
         self.pt_inliers_id = []
         self.occ_inliers_id = []
         self.equation = []
         self.occ_score = 0
         self.counter = count
+        self.perfect_split = False
+        self.plot = plot
 
 
     # def optimize_plane(self,points):
@@ -42,7 +44,7 @@ class Plane:
     #     return [C[0], C[1], -1., C[2]]
 
     def optimize_plane(self, points, plane):
-        # from here:https://stackoverflow.com/questions/35118419/wrong-result-for-best-fit-plane-to-set-of-points-with-scipy-linalg-lstsq
+        # from here: https://stackoverflow.com/questions/35118419/wrong-result-for-best-fit-plane-to-set-of-points-with-scipy-linalg-lstsq
         def model(params, xyz):
             a, b, c, d = params
             x, y, z = xyz
@@ -58,6 +60,38 @@ class Plane:
         cons = ({'type': 'eq', 'fun': unit_length})
         sol = minimize(model, plane, args=[points[:,0],points[:,1],points[:,2]], constraints=cons)
         return tuple(sol.x)
+
+    def optimize_plane_occ(self, points, occ, plane):
+        # from here: https://stackoverflow.com/questions/35118419/wrong-result-for-best-fit-plane-to-set-of-points-with-scipy-linalg-lstsq
+        def model(params, xyzo):
+            a, b, c, d = params
+            x, y, z, o = xyzo
+            dist = a * x + b * y + c * z + d
+            sigmoid_dist = 1 / (1 + np.exp(-dist*10))
+            asd = 1 - sigmoid_dist
+            return ((sigmoid_dist*o)+asd).sum()
+
+        def unit_length(params):
+            a, b, c, d = params
+            return a ** 2 + b ** 2 + c ** 2 - 1
+
+        # x,y,z = points[:,0],points[:,1],points[:,2]
+        # constrain the vector perpendicular to the plane be of unit length
+        cons = ({'type': 'eq', 'fun': unit_length})
+        occ = 1 - occ
+        sol = minimize(model, plane, args=[points[:,0],points[:,1],points[:,2],occ],constraints=cons)
+        return tuple(sol.x)
+
+
+    # def optimize_plane_occ2(self,points,occ,plane):
+    #
+    #     from sklearn.svm import LinearSVC
+    #
+    #     svm = LinearSVC(random_state=0, tol=1e-5)
+    #     svm.fit(points, occ)
+    #
+    #     params = svm.get_params()
+    #     return params
 
     def project_points_to_plane(self,points,plane):
 
@@ -96,6 +130,7 @@ class Plane:
     def segment(self, im):
 
         ## see example usage here: https://scipy-lectures.org/packages/scikit-image/auto_examples/plot_labels.html
+        ## see some theory here: https://web.cs.wpi.edu/~emmanuel/courses/cs545/S14/slides/lecture08.pdf
         labels, num_labels = measure.label(im, background=0, return_num=True)
 
         self.plt = plt.figure(figsize=(9, 3.5))
@@ -171,7 +206,7 @@ class Plane:
 
 
     def fit(self, pts, thresh=0.05, minPoints=100, maxIteration=1000,
-            optimization=False, segmentation=False):
+            optimization=False, segmentation=False, segmentation_resolution=50):
         """
         Find the best equation for a plane.
 
@@ -223,16 +258,19 @@ class Plane:
 
         if segmentation:
             if len(best_eq) > 0:
-                split_groups = self.cluster_inliers(best_eq,pts[best_pt_inliers])
+                split_groups = self.cluster_inliers(best_eq,pts[best_pt_inliers],res=segmentation_resolution)
                 self.plt.set_facecolor('red')
                 if split_groups is not None:
-                    # print("Found {} component(s) plane".format(len(split_groups)))
                     split_best_pt_inliers = []
+                    # best_eqs = []
                     for sp in split_groups:
+                        ## this is for optimization per segment. However, it is not that simple. One I optimized the plane, I need to recalculate its inliers, which in turn reverses the segmentation
                         # new_plane = self.optimize_plane(pts[best_pt_inliers[sp]])
                         # new_inliers = self.get_pt_inliers(pts,new_plane,thresh)
                         # self.plot_inliers(pts[new_inliers],new_plane)
-                        # best_eq = new_plane
+                        # best_eqs.append(new_plane)
+                        # rm_id = np.isnan(pts[new_inliers]).any(axis=1)
+                        # new_inliers = np.delete(new_inliers,rm_id)
                         # split_best_pt_inliers.append(new_inliers)
                         split_best_pt_inliers.append(best_pt_inliers[sp])
                     self.equation = best_eq
@@ -241,9 +279,12 @@ class Plane:
                     self.plt.set_facecolor('green')
 
                 self.plt.suptitle("[{}] Point Plane".format(self.counter),color='white',size=18, weight='bold')
-                self.plt.show()
+                if self.plot:
+                    self.plt.show()
+                else:
+                    plt.close(self.plt)
         else:
-            self.equation = [best_eq]
+            self.equation = best_eq
             self.pt_inliers_id = [best_pt_inliers]
 
         return self.equation, self.pt_inliers_id
@@ -251,18 +292,25 @@ class Plane:
 
     def get_occ_inliers(self,occ_tgt,pts_tgt,plane_eq):
 
+        """this function is written with strange sums instead of equals because it makes it robust to NaNs.
+        The problem with NaNs is that np.array([0,np.nan]).astype(bool) => array(False, True) which messes up the function"""
+
         ## check if points are left or right of plane (same as distance check, but scaling (denominator) is not necessary)
         occ_pt = np.sign(plane_eq[0] * pts_tgt[:, 0] + plane_eq[1] * pts_tgt[:, 1] + plane_eq[2] * pts_tgt[:, 2] + plane_eq[3])
 
         ## now just check for correct inside/outside classification here, one orientation check is enough
         # check inside on the right or outside on the left
         occ = (occ_pt / 2) + 0.5  # put the side to [0,1] values
-        check = ((occ_tgt + occ) > 1).sum()
-        inside = check / np.nansum(occ)
+        check = ((occ_tgt + occ) > 1).sum() # this checks for each point if gt_occ and plane_occ are inside
+        with np.errstate(divide='ignore',invalid='ignore'): # putting this here, because the plane can split all points to outside, and here I can only do inside checks (ie occ == 1)
+            inside = check / np.nansum(occ)
+
         occ = 1 - occ
         occ_tgt = 1 - occ_tgt
-        check = ((occ_tgt + occ) > 1).sum()
-        outside = check / np.nansum(occ)
+        check = ((occ_tgt + occ) > 1).sum() # this checks for each point if gt_occ and plane_occ are inside (ie reversed outside)
+        with np.errstate(divide='ignore',invalid='ignore'):
+            outside = check / np.nansum(occ)
+
         in_out = np.vstack((inside, outside))
 
         best_side = np.nanargmax(in_out)
@@ -275,7 +323,7 @@ class Plane:
 
     def fit_with_occ(self, pts, normals=None, pts_tgt=None, occ_tgt=None,
                      thresh=0.05, minPoints=100, minOccScore=0.5, maxIteration=1000,
-                     optimization=False, segmentation=False):
+                     optimization=False, segmentation=False, segmentation_resolution=50):
         """
         Find the best equation for a plane.
 
@@ -296,6 +344,7 @@ class Plane:
         best_pt_inliers = []
         best_occ_inliers = []
         best_occ_score = 0
+        best_best_side = None
 
         # np.random.seed(42)
         for it in range(maxIteration):
@@ -328,33 +377,38 @@ class Plane:
             # get occ inliers
             occ_score, occ, occ_id_inliers, in_out, best_side = self.get_occ_inliers(occ_tgt,pts_tgt,plane_eq) # i do not need the /sqrt for this, if I want to do v high level optimization
 
-            if (len(pt_id_inliers) >= minPoints) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
+            # if (len(pt_id_inliers) >= minPoints) and (occ_score > best_occ_score) and (occ_score >= minOccScore):
+            if (len(pt_id_inliers) >= minPoints) and (len(pt_id_inliers) > len(best_pt_inliers)) and (occ_score >= minOccScore):
 
                 ## if the occupancy classification is also good on the other side of the plane
                 ## then take away these points too, ie take away all occ points
                 if in_out[np.invert(best_side),0] > minOccScore:
                     print("all occupancy points are out")
                     occ_id_inliers = np.arange(occ.shape[0])
+                    self.perfect_split = True
 
                 best_eq = plane_eq
                 best_pt_inliers = pt_id_inliers
+                best_best_side = best_side
 
                 best_occ_score = occ_score
                 best_occ_inliers = occ_id_inliers
 
         if segmentation:
             if len(best_eq) > 0:
-                split_groups = self.cluster_inliers(best_eq,pts[best_pt_inliers])
+                split_groups = self.cluster_inliers(best_eq,pts[best_pt_inliers],res=segmentation_resolution)
                 self.plt.set_facecolor('red')
                 if split_groups is not None:
-                    # print("Found {} component(s) plane".format(len(split_groups)))
                     split_best_pt_inliers = []
-                    best_eqs = []
+                    # best_eqs = []
                     for sp in split_groups:
+                        ## this is for optimization per segment. However, it is not that simple. Once I optimized the plane, I need to recalculate its inliers, which in turn reverses the segmentation
                         # new_plane = self.optimize_plane(pts[best_pt_inliers[sp]],best_eq)
                         # new_inliers = self.get_pt_inliers(pts,new_plane,thresh)
+                        # rm_id = np.isnan(pts[new_inliers]).any(axis=1)
+                        # new_inliers = np.delete(new_inliers,rm_id)
                         # self.plot_inliers(pts[new_inliers],new_plane)
-                        # best_eq = new_plane
+                        # best_eqs.append(new_plane)
                         # split_best_pt_inliers.append(new_inliers)
                         split_best_pt_inliers.append(best_pt_inliers[sp])
                     self.equation = best_eq
@@ -366,7 +420,10 @@ class Plane:
 
 
                 self.plt.suptitle("[{}] Occupancy Plane".format(self.counter),color='white',size=18, weight='bold')
-                self.plt.show()
+                if self.plot:
+                    self.plt.show()
+                else:
+                    plt.close(self.plt)
         else:
             self.equation = best_eq
             self.pt_inliers_id = [best_pt_inliers]
@@ -377,4 +434,4 @@ class Plane:
 
 
 
-        return self.equation, self.pt_inliers_id, self.occ_score, self.occ_inliers_id
+        return self.equation, self.pt_inliers_id, self.occ_score, self.occ_inliers_id, self.perfect_split
