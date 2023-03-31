@@ -108,7 +108,7 @@ class Plane:
         e0 = np.array(plane[:3])
         e0 = e0/np.linalg.norm(e0)
         e1 = np.zeros(3)
-        ## reverse the non-zero component and put if on a different axis
+        ## reverse the non-zero component and put it on a different axis
         e1[x], e1[y], e1[z] = e0[x], -e0[z], e0[y]
         ## take the cross product of e0 and e1 to make e2
         e2 = np.cross(e0,e1)

@@ -2,7 +2,6 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/../dgnn/.idea/dgnn.iml" filepath="$PROJECT_DIR$/../dgnn/.idea/dgnn.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/pyRANSAC-3D.iml" filepath="$PROJECT_DIR$/.idea/pyRANSAC-3D.iml" />
     </modules>
   </component>

@@ -1,4 +1,5 @@
 import copy
+import trimesh
 
 PYTHONPATH="/home/rsulzer/python"
 
@@ -10,17 +11,25 @@ from fractions import Fraction
 from sage.all import polytopes, QQ, RR, Polyhedron
 import numpy as np
 import pyransac3d as ransac
-from export import Exporter
+from export import PlaneExporter
 sys.path.append(os.path.join(PYTHONPATH,"ksr-benchmark"))
 from main import Benchmark
-import string
+import string, subprocess
+import open3d as o3d
+from skimage import measure
+
+from tqdm import tqdm
+
+sys.path.append(os.path.join(PYTHONPATH,"..","cpp","check_mesh_contains","build","release"))
+import libMeshContains as MC
+
 
 class PBR:
 
 
     def __init__(self):
 
-        pass
+        self.exporter = PlaneExporter()
 
     def _inequalities(self,plane):
         """
@@ -359,6 +368,159 @@ class PBR:
 
 
 
+    def marching_cubes(self,m,res=196):
+
+        self.get_bounding_box(m)
+
+        x = np.linspace(self.bounding_poly.bounding_box()[0][0],self.bounding_poly.bounding_box()[1][0],res)
+        y = np.linspace(self.bounding_poly.bounding_box()[0][1],self.bounding_poly.bounding_box()[1][1],res)
+        z = np.linspace(self.bounding_poly.bounding_box()[0][2],self.bounding_poly.bounding_box()[1][2],res)
+        xv, yv, zv = np.meshgrid(x,y,z)
+
+        positions = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).transpose()
+
+
+        mc = MC.Checker()
+        mc.loadMesh(m["mesh"])
+        contains = mc.check(positions)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(positions)
+        colors = []
+        for co in contains:
+            col = [1,0,0] if co else [0,0,1]
+            colors.append(col)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        os.makedirs(os.path.join(m["path"], "grid_points"),exist_ok=True)
+        o3d.io.write_point_cloud(os.path.join(m["path"], "grid_points", "{}.ply".format(m["model"])), pcd)
+
+        occupancy_grid = contains.reshape((res, res, res)).astype(int)
+        occupancy_grid = occupancy_grid.swapaxes(1,0)
+
+        # Extract the surface using marching cubes
+        verts, faces, normals, values = measure.marching_cubes(occupancy_grid, level=0.5, gradient_direction='ascent')
+
+        # Create an Open3D mesh from the surface vertices and faces
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts)
+        mesh.vertex_normals = o3d.utility.Vector3dVector(normals)
+        mesh.triangles = o3d.utility.Vector3iVector(faces)
+
+
+        # # Scale the mesh by the maximum distance
+        # mesh.scale(1/40, mesh.get_center())
+        #
+        center = mesh.get_axis_aligned_bounding_box().get_center()
+        mesh.translate(-center)
+
+        # Scale the mesh using the calculated scaling factor
+        mesh.scale(max(self.bounding_poly.bounding_box()[1])/(res/2), [0, 0, 0])
+
+
+        # Export the mesh to a file in OBJ format
+        os.makedirs(os.path.join(m["path"], "mc_mesh"), exist_ok=True)
+        o3d.io.write_triangle_mesh(os.path.join(m["path"], "mc_mesh", "{}.ply".format(m["model"])), mesh)
+
+        pcd = mesh.sample_points_uniformly(number_of_points=100000)
+        pcd.estimate_normals()
+        o3d.io.write_point_cloud(os.path.join(os.path.dirname(m["pointcloud_ply"]),"{}_{}.ply".format(m["model"],str(res))),pcd)
+
+        q=5
+
+    def extract_planes(self,m):
+
+        scan = np.load(m["scan"])
+        points = scan["points"]
+        # normals = scan["normals"]
+        occ = np.load(m["occ"])
+        points_tgt = occ["points"]
+        occ_tgt = np.unpackbits(occ["occupancies"]).astype(float)
+
+        group_verts = []
+        group_points  = []
+        planes = []
+        group_num_points = []
+
+        occ_scores = []
+
+        it = 0; maxIter = 100
+        plane_count = 0; maxPlanes = 50
+        maxbar = tqdm(maxIter,leave=False)
+
+        files=[]
+
+        while len(planes) < maxPlanes:
+            np.random.seed(None)
+            c = np.random.random(size=3)
+            it+=1
+            maxbar.update(1)
+            if it > maxIter:
+                print("stopped at global maxiter")
+                break
+
+            if np.isnan(points_tgt).all() or np.isnan(points).all():
+                print("all occupancy or surface points are treated")
+                break
+
+            plane1 = ransac.Plane(count=plane_count)
+            # best_eq, best_inliers = plane1.fit(points, thresh=0.875, minPoints=50, maxIteration=100)
+            best_eq, best_inliers, best_occ_score, best_occ_pts = plane1.fit_with_occ(points, pts_tgt=points_tgt, occ_tgt=occ_tgt,
+                                                                                      thresh=0.05, minPoints=20, minOccScore=0.96, maxIteration=5000,
+                                                                                      optimization=True, segmentation=True)
+            if len(best_eq) == 0:
+                best_eq, best_inliers = plane1.fit(points, thresh=0.1, minPoints=20, maxIteration=5000,
+                                                   optimization=True, segmentation=True)
+
+            if len(best_eq) == 0:
+                continue
+
+            occ_scores.append({plane_count:best_occ_score})
+            for i,bi in enumerate(best_inliers):
+                group_verts += list(bi)
+                gp = points[bi]
+                group_points.append(gp)
+                group_num_points.append(len(gp))
+                planes.append(best_eq)
+
+                if best_occ_score > 0.98: # occ points are removed
+                    fname = os.path.join(os.path.dirname(m["ransac"]),"planes",str(plane_count)+"r.obj")
+                    files.append(fname)
+                    # export plane and take out the processed surface pts
+                    self.exporter.export_plane(os.path.dirname(m["ransac"]), best_eq, gp, count=str(plane_count)+"r", color=c)
+                    points[bi, :] = None
+                    # export and then take out the processed occupancy points, only once, for split planes, that is why there is the np.isnan
+                    if(not np.isnan(points_tgt[best_occ_pts,:]).any()):
+                        self.exporter.export_deleted_points(os.path.dirname(m["ransac"]), points_tgt[best_occ_pts, :], count=str(plane_count)+"r",color=c)
+                        points_tgt[best_occ_pts, :] = None
+                        occ_tgt[best_occ_pts] = None
+                        fname = os.path.join(os.path.dirname(m["ransac"]), "deleted_points", str(plane_count) + "r.obj")
+                        files.append(fname)
+                else: # occ point are not removed
+                    fname = os.path.join(os.path.dirname(m["ransac"]),"planes",str(plane_count)+".obj")
+                    files.append(fname)
+                    if best_occ_score > 0:
+                        fname = os.path.join(os.path.dirname(m["ransac"]),"deleted_points",str(plane_count)+".obj")
+                        files.append(fname)
+                    self.exporter.export_plane(os.path.dirname(m["ransac"]), best_eq, gp, count=plane_count, color=c)
+                    points[bi, :] = None
+                    self.exporter.export_deleted_points(os.path.dirname(m["ransac"]), points_tgt[best_occ_pts, :], count=plane_count,color=c)
+
+                plane_count+=1
+
+        maxbar.close()
+        print(occ_scores)
+        assert(len(group_points)==len(planes))
+        # save to ply
+        np.savez(m["ransac"],
+                 points=scan["points"],normals=scan["normals"],
+                 group_parameters=np.array(planes),
+                 group_num_points=np.array(group_num_points).astype(int),
+                 group_points=np.array(group_verts)
+                 )
+
+        subprocess.Popen(["meshlab"]+files)
+
+
 
 
 
@@ -373,13 +535,15 @@ if __name__ == '__main__':
 
     path = "/home/rsulzer/data/reconbench"
     ds = berger.Berger(path=path)
-    models = ds.getModels(scan_conf="1",ksr_k=ksr_k,abspy_k=abspy_k,hint="daratech")
+    models = ds.getModels(scan_conf="1",ksr_k=ksr_k,abspy_k=abspy_k,hint="anchor")
 
     path = "/home/rsulzer/data/reconbench"
     bm = Benchmark(path)
     for m in models:
 
         # pbr.test_optim(m)
+
+        pbr.marching_cubes(m)
 
         bm.clear(m)
         pbr.construct(m)
